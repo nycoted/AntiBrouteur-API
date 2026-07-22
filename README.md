@@ -1,13 +1,21 @@
-# AntiBrouteur API
+# Serveur communautaire AntiBrouteur
 
-Déploiement Railway :
-1. Téléverse tous les fichiers à la racine du dépôt GitHub.
-2. Railway détecte Python et lance automatiquement Uvicorn.
-3. Ajoute les variables `BLOCK_THRESHOLD=3` et `ADMIN_API_KEY=une-cle-secrete`.
-4. Dans Settings > Networking, clique sur Generate Domain.
-5. Teste `/health` puis `/docs`.
+## Démarrage local
 
-Routes : `/health`, `/version`, `/check/{numero}`, `/report`, `/updates`.
+```bash
+python -m venv .venv
+# Windows
+.venv\Scripts\activate
+# macOS/Linux
+source .venv/bin/activate
 
-Pour conserver SQLite entre les redéploiements, ajoute un volume Railway monté sur `/data` puis définis :
-`DATABASE_PATH=/data/antibrouteur.db`
+pip install -r requirements.txt
+uvicorn main:app --host 0.0.0.0 --port 8080
+```
+
+Dans l’émulateur Android, l’adresse par défaut `http://10.0.2.2:8080` pointe vers ce serveur.
+
+Pour un téléphone réel, déployez l’API sur un serveur HTTPS et saisissez son URL dans :
+**Paramètres → Serveur communautaire**.
+
+Le serveur refuse qu’une même installation signale deux fois le même numéro.

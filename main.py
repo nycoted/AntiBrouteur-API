@@ -1,172 +1,116 @@
-import hashlib, os, re, sqlite3
-from contextlib import closing
+from __future__ import annotations
+
+import hashlib
+import re
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
-from fastapi import FastAPI, Header, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
+
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-APP_VERSION = "1.0.0"
-DATABASE_VERSION = 1
-BLOCK_THRESHOLD = int(os.getenv("BLOCK_THRESHOLD", "3"))
-DB_PATH = Path(os.getenv("DATABASE_PATH", "antibrouteur.db"))
-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
+DB_PATH = Path(__file__).with_name("community.db")
+app = FastAPI(title="AntiBrouteur Community API", version="1.0.0")
 
-app = FastAPI(title="AntiBrouteur Community API", version=APP_VERSION)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-class ReportRequest(BaseModel):
-    number: str = Field(min_length=3, max_length=40)
-    reporter_id: str = Field(min_length=8, max_length=200)
-    category: str = Field(default="spam", max_length=80)
-    comment: Optional[str] = Field(default=None, max_length=500)
+class ReportIn(BaseModel):
+    number: str = Field(min_length=6, max_length=32)
+    category: str = Field(min_length=2, max_length=100)
+    installation_id: str = Field(min_length=32, max_length=128)
 
-def now():
-    return datetime.now(timezone.utc).isoformat()
 
-def normalize_number(value: str):
-    value = value.strip()
-    has_plus = value.startswith("+")
-    digits = re.sub(r"\D", "", value)
-    if len(digits) < 3 or len(digits) > 18:
-        raise HTTPException(400, "Format de numéro invalide")
-    return ("+" if has_plus else "") + digits
+def db() -> sqlite3.Connection:
+    connection = sqlite3.connect(DB_PATH)
+    connection.row_factory = sqlite3.Row
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            number_hash TEXT NOT NULL,
+            display_number TEXT NOT NULL,
+            category TEXT NOT NULL,
+            installation_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(number_hash, installation_id)
+        )
+    """)
+    connection.commit()
+    return connection
 
-def reporter_hash(value: str):
-    return hashlib.sha256(value.strip().encode()).hexdigest()
 
-def connect():
-    db = sqlite3.connect(DB_PATH, timeout=15)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA journal_mode=WAL")
-    return db
+def normalize_number(value: str) -> str:
+    clean = re.sub(r"[^0-9+]", "", value)
+    if clean.startswith("00"):
+        clean = "+" + clean[2:]
+    if len(re.sub(r"\D", "", clean)) < 6:
+        raise HTTPException(status_code=400, detail="Numéro invalide")
+    return clean
 
-def init_db():
-    with closing(connect()) as db:
-        db.executescript("""
-        CREATE TABLE IF NOT EXISTS reports(
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          number TEXT NOT NULL,
-          reporter_hash TEXT NOT NULL,
-          category TEXT NOT NULL,
-          comment TEXT,
-          created_at TEXT NOT NULL,
-          UNIQUE(number, reporter_hash)
-        );
-        CREATE INDEX IF NOT EXISTS idx_reports_number ON reports(number);
-        CREATE TABLE IF NOT EXISTS allowlist(
-          number TEXT PRIMARY KEY,
-          reason TEXT,
-          created_at TEXT NOT NULL
-        );
-        """)
-        db.commit()
 
-@app.on_event("startup")
-def startup():
-    init_db()
+def number_hash(value: str) -> str:
+    return hashlib.sha256(("antibrouteur:" + value).encode()).hexdigest()
 
-@app.get("/")
-def root():
-    return {"service":"AntiBrouteur Community API","status":"online","version":APP_VERSION,"docs":"/docs"}
 
 @app.get("/health")
-def health():
-    with closing(connect()) as db:
-        db.execute("SELECT 1")
-    return {"status":"ok"}
+def health() -> dict:
+    return {"ok": True}
 
-@app.get("/version")
-def version():
-    with closing(connect()) as db:
-        total_reports = db.execute("SELECT COUNT(*) c FROM reports").fetchone()["c"]
-        total_numbers = db.execute("SELECT COUNT(DISTINCT number) c FROM reports").fetchone()["c"]
-    return {
-      "api_version":APP_VERSION,
-      "database_version":DATABASE_VERSION,
-      "block_threshold":BLOCK_THRESHOLD,
-      "total_reports":total_reports,
-      "total_numbers":total_numbers,
-      "updated_at":now()
-    }
 
-@app.get("/check/{number:path}")
-def check(number: str):
-    number = normalize_number(number)
-    with closing(connect()) as db:
-        allowlisted = db.execute("SELECT 1 FROM allowlist WHERE number=?", (number,)).fetchone() is not None
-        row = db.execute("SELECT COUNT(*) reports, MAX(created_at) last_reported_at FROM reports WHERE number=?", (number,)).fetchone()
-    reports = int(row["reports"] or 0)
-    blocked = reports >= BLOCK_THRESHOLD and not allowlisted
-    status = "trusted" if allowlisted else "spam" if blocked else "suspect" if reports else "unknown"
-    return {
-      "number":number,"status":status,"reports":reports,"blocked":blocked,
-      "allowlisted":allowlisted,"threshold":BLOCK_THRESHOLD,
-      "last_reported_at":row["last_reported_at"]
-    }
-
-@app.post("/report")
-def report(payload: ReportRequest):
+@app.post("/v1/community/report")
+def submit_report(payload: ReportIn) -> dict:
     number = normalize_number(payload.number)
-    rhash = reporter_hash(payload.reporter_id)
-    with closing(connect()) as db:
-        if db.execute("SELECT 1 FROM allowlist WHERE number=?", (number,)).fetchone():
-            raise HTTPException(409, "Numéro sur liste blanche")
-        duplicate = False
-        try:
-            db.execute(
-              "INSERT INTO reports(number,reporter_hash,category,comment,created_at) VALUES(?,?,?,?,?)",
-              (number,rhash,payload.category.strip().lower() or "spam",payload.comment,now())
-            )
-            db.commit()
-        except sqlite3.IntegrityError:
-            duplicate = True
-        reports = db.execute("SELECT COUNT(*) c FROM reports WHERE number=?", (number,)).fetchone()["c"]
+    now = datetime.now(timezone.utc).isoformat()
+    connection = db()
+    try:
+        connection.execute(
+            "INSERT INTO reports(number_hash, display_number, category, installation_id, created_at) VALUES (?, ?, ?, ?, ?)",
+            (number_hash(number), number, payload.category.strip(), payload.installation_id, now),
+        )
+        connection.commit()
+    except sqlite3.IntegrityError:
+        connection.close()
+        return {"accepted": False, "duplicate": True}
+    finally:
+        if connection:
+            connection.close()
+    return {"accepted": True, "duplicate": False}
+
+
+@app.get("/v1/community/numbers")
+def community_numbers() -> dict:
+    connection = db()
+    rows = connection.execute("""
+        SELECT display_number,
+               COUNT(*) AS reports,
+               MAX(created_at) AS last_seen,
+               (
+                   SELECT category FROM reports r2
+                   WHERE r2.number_hash = r.number_hash
+                   GROUP BY category
+                   ORDER BY COUNT(*) DESC, MAX(created_at) DESC
+                   LIMIT 1
+               ) AS category
+        FROM reports r
+        GROUP BY number_hash, display_number
+        HAVING COUNT(*) >= 1
+        ORDER BY reports DESC, last_seen DESC
+        LIMIT 5000
+    """).fetchall()
+    connection.close()
     return {
-      "accepted":not duplicate,"duplicate":duplicate,"number":number,
-      "reports":reports,"blocked":reports >= BLOCK_THRESHOLD,
-      "message":"Signalement déjà enregistré" if duplicate else "Signalement enregistré"
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "numbers": [
+            {
+                "number": row["display_number"],
+                "reports": row["reports"],
+                "category": row["category"] or "Non précisé",
+                "last_seen": row["last_seen"],
+                "status": (
+                    "Campagne confirmée" if row["reports"] >= 10
+                    else "Risque élevé" if row["reports"] >= 3
+                    else "Suspect" if row["reports"] >= 2
+                    else "À surveiller"
+                ),
+            }
+            for row in rows
+        ],
     }
-
-@app.get("/updates")
-def updates(
-    since: Optional[str] = None,
-    minimum_reports: int = Query(1, ge=1, le=1000),
-    limit: int = Query(1000, ge=1, le=5000)
-):
-    q = "SELECT number, COUNT(*) reports, MAX(created_at) updated_at FROM reports"
-    params = []
-    if since:
-        q += " WHERE created_at > ?"
-        params.append(since)
-    q += " GROUP BY number HAVING COUNT(*) >= ? ORDER BY updated_at DESC LIMIT ?"
-    params += [minimum_reports, limit]
-    with closing(connect()) as db:
-        rows = db.execute(q, params).fetchall()
-        allow = {r["number"] for r in db.execute("SELECT number FROM allowlist")}
-    items = [
-      {"number":r["number"],"reports":r["reports"],"blocked":r["reports"] >= BLOCK_THRESHOLD,"updated_at":r["updated_at"]}
-      for r in rows if r["number"] not in allow
-    ]
-    return {
-      "database_version":DATABASE_VERSION,"generated_at":now(),
-      "threshold":BLOCK_THRESHOLD,"count":len(items),"items":items,
-      "numbers":[x["number"] for x in items if x["blocked"]]
-    }
-
-def admin_check(key):
-    if not ADMIN_API_KEY:
-        raise HTTPException(503, "ADMIN_API_KEY non configurée")
-    if key != ADMIN_API_KEY:
-        raise HTTPException(401, "Clé administrateur invalide")
-
-@app.post("/admin/allowlist/{number:path}")
-def add_allow(number: str, reason: str="Ajout administrateur", x_admin_key: Optional[str]=Header(None)):
-    admin_check(x_admin_key)
-    number = normalize_number(number)
-    with closing(connect()) as db:
-        db.execute("INSERT OR REPLACE INTO allowlist(number,reason,created_at) VALUES(?,?,?)",(number,reason,now()))
-        db.commit()
-    return {"ok":True,"number":number,"allowlisted":True}

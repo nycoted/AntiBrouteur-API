@@ -1,21 +1,55 @@
-# Serveur communautaire AntiBrouteur
+# AntiBrouteur API — correction des numéros
 
-## Démarrage local
+Cette version accepte les formats suivants :
 
-```bash
-python -m venv .venv
-# Windows
-.venv\Scripts\activate
-# macOS/Linux
-source .venv/bin/activate
+- `0612345678`
+- `06 12 34 56 78`
+- `+33612345678`
+- `+33 6 12 34 56 78`
+- `0033612345678`
+- les numéros internationaux E.164, par exemple `+12025550100`
 
-pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 8080
+Les numéros français sont enregistrés sous la forme `+33...`.
+
+## Fichiers à mettre sur GitHub
+
+Remplace les anciens fichiers du dépôt par :
+
+- `main.py`
+- `requirements.txt`
+- `render.yaml`
+
+Puis fais un commit. Render doit redéployer automatiquement.
+
+## Variables Render
+
+La variable `DATABASE_URL` doit être reliée à la base `antibrouteur-db`.
+
+La variable `REPORT_THRESHOLD` vaut `3` par défaut. Un numéro apparaît dans
+`GET /v1/community/numbers` après trois signalements venant de trois
+`installation_id` différents.
+
+## Test Swagger
+
+Ouvre `/docs`, puis exécute trois fois `POST /v1/community/report` avec le même
+numéro et trois identifiants différents :
+
+```json
+{
+  "number": "0612345678",
+  "category": "arnaque",
+  "installation_id": "test-antibrouteur-001"
+}
 ```
 
-Dans l’émulateur Android, l’adresse par défaut `http://10.0.2.2:8080` pointe vers ce serveur.
+Puis change l'identifiant en `test-antibrouteur-002` et
+`test-antibrouteur-003`.
 
-Pour un téléphone réel, déployez l’API sur un serveur HTTPS et saisissez son URL dans :
-**Paramètres → Serveur communautaire**.
+La réponse POST indique désormais :
 
-Le serveur refuse qu’une même installation signale deux fois le même numéro.
+- `inserted`
+- `reports`
+- `required`
+- `published`
+
+Ensuite, ouvre `GET /v1/community/numbers`.

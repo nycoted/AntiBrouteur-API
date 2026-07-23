@@ -1,55 +1,54 @@
-# AntiBrouteur API — correction des numéros
+# AntiBrouteur API — ajout de la suppression
 
-Cette version accepte les formats suivants :
+Cette version ajoute deux routes dans Swagger :
 
-- `0612345678`
-- `06 12 34 56 78`
-- `+33612345678`
-- `+33 6 12 34 56 78`
-- `0033612345678`
-- les numéros internationaux E.164, par exemple `+12025550100`
+## 1. Supprimer complètement un numéro
 
-Les numéros français sont enregistrés sous la forme `+33...`.
+`DELETE /v1/community/number/{number}`
 
-## Fichiers à mettre sur GitHub
+Cette route supprime tous les signalements liés au numéro. Elle est protégée
+par la variable Render `ADMIN_API_KEY`.
 
-Remplace les anciens fichiers du dépôt par :
+Dans Swagger :
+
+1. Ouvrez la route DELETE.
+2. Cliquez sur **Try it out**.
+3. Dans `number`, mettez par exemple `0612345678`.
+4. Dans `X-Admin-Key`, mettez la valeur de `ADMIN_API_KEY`.
+5. Cliquez sur **Execute**.
+
+## 2. Retirer un seul signalement
+
+`DELETE /v1/community/report/{number}/{installation_id}`
+
+Cette route retire seulement le signalement correspondant à
+l'`installation_id` indiqué.
+
+## Installation sur GitHub
+
+Remplacez les anciens fichiers du dépôt par :
 
 - `main.py`
 - `requirements.txt`
 - `render.yaml`
+- `README.md`
 
-Puis fais un commit. Render doit redéployer automatiquement.
+Puis faites **Commit changes**. Render redéploiera automatiquement.
 
-## Variables Render
+## Vérification sur Render
 
-La variable `DATABASE_URL` doit être reliée à la base `antibrouteur-db`.
+Dans **Environment**, vérifiez que les variables suivantes existent :
 
-La variable `REPORT_THRESHOLD` vaut `3` par défaut. Un numéro apparaît dans
-`GET /v1/community/numbers` après trois signalements venant de trois
-`installation_id` différents.
+- `PYTHON_VERSION`
+- `REPORT_THRESHOLD`
+- `DATABASE_URL`
+- `ADMIN_API_KEY`
 
-## Test Swagger
+Si `ADMIN_API_KEY` n'a pas été créée automatiquement, ajoutez-la avec :
 
-Ouvre `/docs`, puis exécute trois fois `POST /v1/community/report` avec le même
-numéro et trois identifiants différents :
+**Add variable → Generated secret**
 
-```json
-{
-  "number": "0612345678",
-  "category": "arnaque",
-  "installation_id": "test-antibrouteur-001"
-}
-```
+Nom : `ADMIN_API_KEY`
 
-Puis change l'identifiant en `test-antibrouteur-002` et
-`test-antibrouteur-003`.
-
-La réponse POST indique désormais :
-
-- `inserted`
-- `reports`
-- `required`
-- `published`
-
-Ensuite, ouvre `GET /v1/community/numbers`.
+Gardez cette clé privée. Ne la placez jamais dans une capture publique,
+dans GitHub ou directement dans l'application Android.

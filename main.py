@@ -3,7 +3,7 @@ import re
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel, Field
 from sqlalchemy import (
     create_engine,
@@ -16,6 +16,7 @@ from sqlalchemy import (
     UniqueConstraint,
     select,
     func,
+    delete,
 )
 from sqlalchemy.exc import IntegrityError
 
@@ -26,6 +27,7 @@ app = FastAPI(
 
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 REPORT_THRESHOLD = max(1, int(os.getenv("REPORT_THRESHOLD", "3")))
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()
 
 # Render peut fournir postgres:// ; SQLAlchemy attend postgresql+psycopg://
 if DATABASE_URL.startswith("postgres://"):
@@ -121,6 +123,94 @@ def normalize_phone_number(value: str) -> Optional[str]:
         return value
 
     return None
+
+
+def require_admin_key(x_admin_key: Optional[str]) -> None:
+    if not ADMIN_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="ADMIN_API_KEY absente sur Render",
+        )
+    if not x_admin_key or x_admin_key != ADMIN_API_KEY:
+        raise HTTPException(
+            status_code=401,
+            detail="Clé administrateur invalide",
+        )
+
+
+@app.delete("/v1/community/number/{number}")
+def delete_community_number(
+    number: str,
+    x_admin_key: Optional[str] = Header(default=None, alias="X-Admin-Key"),
+):
+    """
+    Supprime tous les signalements associés à un numéro.
+    Cette route est protégée par l'en-tête X-Admin-Key.
+    """
+    require_admin_key(x_admin_key)
+
+    normalized = normalize_phone_number(number)
+    if normalized is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Numéro invalide",
+        )
+
+    db = get_engine()
+    with db.begin() as connection:
+        result = connection.execute(
+            delete(reports).where(reports.c.number == normalized)
+        )
+
+    if result.rowcount == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Numéro absent de la base",
+        )
+
+    return {
+        "ok": True,
+        "number": normalized,
+        "deleted_reports": result.rowcount,
+    }
+
+
+@app.delete("/v1/community/report/{number}/{installation_id}")
+def delete_own_report(
+    number: str,
+    installation_id: str,
+):
+    """
+    Retire un seul signalement correspondant au numéro et à l'installation.
+    """
+    normalized = normalize_phone_number(number)
+    if normalized is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Numéro invalide",
+        )
+
+    db = get_engine()
+    with db.begin() as connection:
+        result = connection.execute(
+            delete(reports).where(
+                reports.c.number == normalized,
+                reports.c.installation_id == installation_id,
+            )
+        )
+
+    if result.rowcount == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Signalement introuvable",
+        )
+
+    return {
+        "ok": True,
+        "number": normalized,
+        "installation_id": installation_id,
+        "deleted_reports": result.rowcount,
+    }
 
 
 @app.get("/health")
